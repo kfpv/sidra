@@ -3,4 +3,8 @@ dist/
 node_modules/
 result/
 release/
+assets/plugin-manager/
 *.log
+mobile/android/android/.gradle/
+mobile/android/android/local.properties
+mobile/android/android/app/build/

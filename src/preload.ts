@@ -3,15 +3,11 @@ import { contextBridge, ipcRenderer } from 'electron';
 // Channels the renderer is allowed to send to the main process.
 // Extend this list as new renderer-to-main IPC messages are added.
 const SEND_CHANNELS = new Set<SendChannel>([
-  'playbackStateDidChange',
-  'nowPlayingItemDidChange',
-  'playbackTimeDidChange',
-  'repeatModeDidChange',
-  'shuffleModeDidChange',
-  'volumeDidChange',
+  'playbackSnapshotDidChange',
   'nav:back',
   'nav:forward',
   'nav:reload',
+  'nav:pluginManager',
 ]);
 
 // Channels the main process is allowed to send to the renderer.

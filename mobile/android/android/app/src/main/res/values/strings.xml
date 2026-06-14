@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sidra</string>
+    <string name="title_activity_main">Sidra</string>
+    <string name="package_name">world.wimpys.sidra.android</string>
+    <string name="custom_url_scheme">world.wimpys.sidra.android</string>
+</resources>

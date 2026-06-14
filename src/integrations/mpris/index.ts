@@ -1,7 +1,8 @@
 import { app, BrowserWindow } from 'electron';
 import log from 'electron-log/main';
 
-import { Player, NowPlayingPayload, PlaybackState, PlaybackStatePayload, IntegrationContext } from '../../player';
+import { Player, NowPlayingPayload, IntegrationContext } from '../../player';
+import type { MprisPlaybackStatus, PlaybackSnapshot } from '../../playback/protocol';
 import { downloadArtwork } from '../../artwork';
 import { errorMessage } from '../../utils';
 
@@ -240,19 +241,7 @@ class MediaPlayer2Player extends Interface {
 
   // --- Update methods (called by player event handlers) ---
 
-  updatePlaybackStatus(payload: PlaybackStatePayload): void {
-    if (!payload) return;
-
-    // MusicKit PlaybackStates
-    let status: string;
-    if (payload.state === PlaybackState.Playing) {
-      status = 'Playing';
-    } else if (payload.state === PlaybackState.Paused || payload.state === PlaybackState.Stopped) {
-      status = 'Paused';
-    } else {
-      status = 'Stopped';
-    }
-
+  updatePlaybackStatus(status: MprisPlaybackStatus): void {
     this._playbackStatus = status;
     this._schedulePropertyEmission({ PlaybackStatus: status });
   }
@@ -686,10 +675,13 @@ export function init(ctx: IntegrationContext): void {
 
   const rootIface = new MediaPlayer2(getMainWindow);
   const playerIface = new MediaPlayer2Player(getMainWindow);
+  let lastPlaybackStatus: MprisPlaybackStatus | null = null;
 
   // Thin wrappers with stable references for removeListener
-  const onPlaybackStateDidChange = (payload: PlaybackStatePayload): void => {
-    playerIface.updatePlaybackStatus(payload);
+  const onSnapshotDidChange = (snapshot: PlaybackSnapshot): void => {
+    if (snapshot.mprisStatus === lastPlaybackStatus) return;
+    lastPlaybackStatus = snapshot.mprisStatus;
+    playerIface.updatePlaybackStatus(snapshot.mprisStatus);
   };
   const onNowPlayingItemDidChange = (payload: NowPlayingPayload | null): void => {
     playerIface.updateNowPlaying(payload);
@@ -708,7 +700,7 @@ export function init(ctx: IntegrationContext): void {
   };
 
   app.on('will-quit', () => {
-    player.removeListener('playbackStateDidChange', onPlaybackStateDidChange);
+    player.removeListener('snapshotDidChange', onSnapshotDidChange);
     player.removeListener('nowPlayingItemDidChange', onNowPlayingItemDidChange);
     player.removeListener('repeatModeDidChange', onRepeatModeDidChange);
     player.removeListener('shuffleModeDidChange', onShuffleModeDidChange);
@@ -737,7 +729,7 @@ export function init(ctx: IntegrationContext): void {
   });
 
   // Subscribe to player events
-  player.on('playbackStateDidChange', onPlaybackStateDidChange);
+  player.on('snapshotDidChange', onSnapshotDidChange);
   player.on('nowPlayingItemDidChange', onNowPlayingItemDidChange);
   player.on('repeatModeDidChange', onRepeatModeDidChange);
   player.on('shuffleModeDidChange', onShuffleModeDidChange);

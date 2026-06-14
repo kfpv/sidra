@@ -11,6 +11,7 @@ import { extractItmsUrlFromArgv, type ItmsTarget } from './itms';
 import { initThemeCSS, setThemeCssKey } from './theme';
 import { createTray, getMenuIcon, initTrayStateManager, rebuildTrayMenu, setApplyZoomCallback, setSendCommandCallback } from './tray';
 import { showAboutWindow } from './aboutWindow';
+import { showPluginManagerWindow } from './pluginManagerWindow';
 import { checkForUpdates } from './update';
 import { isAutoUpdateSupported, initAutoUpdate } from './autoUpdate';
 import { init as initNotifications } from './integrations/notifications';
@@ -142,6 +143,7 @@ export interface Assets {
   CATPPUCCIN_CSS: string;
   AUTH_STYLE_FIX_CSS: string;
   navBarScript: string;
+  pluginManagerScript: string;
   hookScript: string;
 }
 
@@ -206,12 +208,7 @@ function setupApplicationMenu(): void {
 
 function initPlayerIPC(): Player {
   const player = new Player();
-  ipcMain.on('playbackStateDidChange', (_event, data) => player.handlePlaybackStateDidChange(data));
-  ipcMain.on('nowPlayingItemDidChange', (_event, data) => player.handleNowPlayingItemDidChange(data));
-  ipcMain.on('playbackTimeDidChange', (_event, data) => player.handlePlaybackTimeDidChange(data));
-  ipcMain.on('repeatModeDidChange', (_event, data) => player.handleRepeatModeDidChange(data));
-  ipcMain.on('shuffleModeDidChange', (_event, data) => player.handleShuffleModeDidChange(data));
-  ipcMain.on('volumeDidChange', (_event, data) => player.handleVolumeDidChange(data));
+  ipcMain.on('playbackSnapshotDidChange', (_event, data) => player.handleSnapshotDidChange(data));
   return player;
 }
 
@@ -254,9 +251,18 @@ function loadAssets(): Assets {
   const AUTH_STYLE_FIX_CSS = fs.readFileSync(authStyleFixCssPath, 'utf-8');
   const navBarPath = getAssetPath('assets', 'navigationBar.js');
   const navBarScript = fs.readFileSync(navBarPath, 'utf-8');
+  const pluginManagerPath = getAssetPath('assets', 'pluginManager.js');
+  const pluginManagerScript = fs.readFileSync(pluginManagerPath, 'utf-8');
   const hookPath = getAssetPath('assets', 'musicKitHook.js');
   const hookScript = fs.readFileSync(hookPath, 'utf-8');
-  return { STYLE_FIX_CSS, CATPPUCCIN_CSS, AUTH_STYLE_FIX_CSS, navBarScript, hookScript };
+  return {
+    STYLE_FIX_CSS,
+    CATPPUCCIN_CSS,
+    AUTH_STYLE_FIX_CSS,
+    navBarScript,
+    pluginManagerScript,
+    hookScript,
+  };
 }
 
 function createMainWindow(ses: Electron.Session): { win: BrowserWindow; winReady: Promise<void> } {
@@ -329,9 +335,15 @@ function setupWindowZoomAndNav(win: BrowserWindow): void {
     resetWedgeDetector();
     win.webContents.reload();
   });
+  ipcMain.on('nav:pluginManager', () => showPluginManagerWindow());
 }
 
-function setupNavigationHandlers(win: BrowserWindow, navBarScript: string, hookScript: string): void {
+function setupNavigationHandlers(
+  win: BrowserWindow,
+  navBarScript: string,
+  pluginManagerScript: string,
+  hookScript: string,
+): void {
   win.webContents.on('did-start-navigation', (_event, url, isInPlace, isMainFrame) => {
     if (isMainFrame) {
       mainLog.debug('did-start-navigation:', url);
@@ -362,6 +374,11 @@ function setupNavigationHandlers(win: BrowserWindow, navBarScript: string, hookS
       await win.webContents.executeJavaScript(navBarScript);
     } catch (e: unknown) {
       mainLog.warn('failed to inject navBarScript on SPA navigation:', e);
+    }
+    try {
+      await win.webContents.executeJavaScript(pluginManagerScript);
+    } catch (e: unknown) {
+      mainLog.warn('failed to inject pluginManagerScript on SPA navigation:', e);
     }
   });
 }
@@ -570,6 +587,8 @@ function setupContentHandlers(win: BrowserWindow, player: Player, markCssReady: 
     mainLog.debug('MusicKit hook injected');
     await win.webContents.executeJavaScript(assets.navBarScript);
     mainLog.debug('Navigation bar injected');
+    await win.webContents.executeJavaScript(assets.pluginManagerScript);
+    mainLog.debug('Plugin Manager menu hook injected');
   }
 
   let initialized = false;
@@ -644,7 +663,12 @@ if (gotLock) {
     setupSessionHeaders(ses);
     setupContentHandlers(win, player, markCssReady, assets);
     setupWindowEvents(win, markCssReady);
-    setupNavigationHandlers(win, assets.navBarScript, assets.hookScript);
+    setupNavigationHandlers(
+      win,
+      assets.navBarScript,
+      assets.pluginManagerScript,
+      assets.hookScript,
+    );
     setupAuthFrameInjection(win, assets.AUTH_STYLE_FIX_CSS);
     if (process.env.SIDRA_DEVTOOLS === '1') {
       win.webContents.openDevTools();

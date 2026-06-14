@@ -3,7 +3,21 @@ import { BrowserWindow } from 'electron';
 
 import { Player, PlaybackState } from '../src/player';
 import type { IntegrationContext } from '../src/player';
+import { initialPlaybackSnapshot } from '../src/playback/reducer';
+import type { PlaybackSnapshot } from '../src/playback/protocol';
 import * as wedgeDetector from '../src/wedgeDetector';
+
+function makeSnapshot(overrides: Partial<PlaybackSnapshot>): PlaybackSnapshot {
+  return {
+    ...initialPlaybackSnapshot(),
+    revision: 1,
+    rawState: PlaybackState.Playing,
+    stableState: 'playing',
+    mprisStatus: 'Playing',
+    isPlaying: true,
+    ...overrides,
+  };
+}
 
 describe('wedgeDetector', () => {
   let player: Player;
@@ -30,10 +44,8 @@ describe('wedgeDetector', () => {
   });
 
   it('fires skip after STALL_THRESHOLD_MS of stalled playback', () => {
-    // Start playing
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Advance past the stall threshold (5000ms) plus one check interval (1000ms)
     vi.advanceTimersByTime(6000);
 
     expect(mockWin.webContents.send).toHaveBeenCalledWith(
@@ -42,88 +54,84 @@ describe('wedgeDetector', () => {
   });
 
   it('does not fire skip before stall threshold', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Advance less than the stall threshold
     vi.advanceTimersByTime(4000);
 
     expect(mockWin.webContents.send).not.toHaveBeenCalled();
   });
 
   it('does not fire skip when position advances', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Simulate position advancing every second
     for (let i = 1; i <= 8; i++) {
       vi.advanceTimersByTime(1000);
-      player.handlePlaybackTimeDidChange(i * 1000);
+      player.handleSnapshotDidChange(makeSnapshot({ positionUs: i * 1_000_000, revision: i + 1 }));
     }
 
     expect(mockWin.webContents.send).not.toHaveBeenCalled();
   });
 
   it('respects MAX_SKIP_ATTEMPTS (3)', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Each skip resets lastAdvanceTime, so we need 5s + check intervals per skip.
-    // After each skip, the detector resets lastAdvanceTime = Date.now().
-    // Skip 1
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(1);
 
-    // Skip 2
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(2);
 
-    // Skip 3
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(3);
 
-    // Skip 4 should not happen - max reached
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(3);
   });
 
   it('reset() clears state and stops timer', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Advance a bit but not past threshold
     vi.advanceTimersByTime(3000);
 
     wedgeDetector.reset();
 
-    // Advance well past threshold - should not fire because reset stopped timer
     vi.advanceTimersByTime(10000);
 
     expect(mockWin.webContents.send).not.toHaveBeenCalled();
   });
 
   it('track change resets skip counter', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
 
-    // Trigger 2 skips
     vi.advanceTimersByTime(6000);
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(2);
 
-    // Track changes - resets skip counter
-    player.handleNowPlayingItemDidChange({ name: 'New Track', durationInMillis: 180000 });
+    player.handleSnapshotDidChange(makeSnapshot({
+      metadata: { name: 'New Track', durationInMillis: 180000 },
+      queueLength: 1,
+      queueIndex: 0,
+      revision: 3,
+    }));
 
-    // Should be able to skip again (counter reset to 0)
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(3);
 
-    // And again
     vi.advanceTimersByTime(6000);
     expect(mockWin.webContents.send).toHaveBeenCalledTimes(4);
   });
 
   it('does not fire skip when playback is paused', () => {
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
+    player.handleSnapshotDidChange(makeSnapshot({}));
     vi.advanceTimersByTime(2000);
 
-    // Pause
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Paused });
+    player.handleSnapshotDidChange(makeSnapshot({
+      rawState: PlaybackState.Paused,
+      stableState: 'paused',
+      mprisStatus: 'Paused',
+      isPlaying: false,
+      revision: 2,
+    }));
 
     vi.advanceTimersByTime(10000);
 
@@ -131,17 +139,18 @@ describe('wedgeDetector', () => {
   });
 
   it('does not fire skip near end of track (within END_SAFETY_MARGIN_MS)', () => {
-    // Set a track with known duration
-    player.handleNowPlayingItemDidChange({ name: 'Track', durationInMillis: 200000 });
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
-
-    // Position near the end of the track (within 10s safety margin)
-    // durationMs = 200000, END_SAFETY_MARGIN_MS = 10000
-    // Condition: (durationMs - lastPositionUs / 1000) < END_SAFETY_MARGIN_MS
-    // lastPositionUs is in microseconds based on variable name, but looking at the code
-    // it receives the playbackTimeDidChange payload directly.
-    // The check is: (200000 - payload / 1000) < 10000 => payload > 190000000
-    player.handlePlaybackTimeDidChange(191000000);
+    player.handleSnapshotDidChange(makeSnapshot({
+      metadata: { name: 'Track', durationInMillis: 200000 },
+      queueLength: 1,
+      queueIndex: 0,
+    }));
+    player.handleSnapshotDidChange(makeSnapshot({
+      metadata: { name: 'Track', durationInMillis: 200000 },
+      queueLength: 1,
+      queueIndex: 0,
+      positionUs: 191_000_000,
+      revision: 2,
+    }));
 
     vi.advanceTimersByTime(10000);
 

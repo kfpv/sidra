@@ -9,15 +9,11 @@
 
 /** Channels the renderer sends to the main process (renderer → main). */
 type SendChannel =
-  | 'playbackStateDidChange'
-  | 'nowPlayingItemDidChange'
-  | 'playbackTimeDidChange'
-  | 'repeatModeDidChange'
-  | 'shuffleModeDidChange'
-  | 'volumeDidChange'
+  | 'playbackSnapshotDidChange'
   | 'nav:back'
   | 'nav:forward'
-  | 'nav:reload';
+  | 'nav:reload'
+  | 'nav:pluginManager';
 
 /** Channels the main process sends to the renderer (main → renderer). */
 type ReceiveChannel =

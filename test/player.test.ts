@@ -1,6 +1,7 @@
 import { describe, it, expect, expectTypeOf, vi } from 'vitest';
 
 import { PlaybackState, Player, getShareUrl, type PlayerEvents } from '../src/player';
+import { initialPlaybackSnapshot } from '../src/playback/reducer';
 
 describe('PlaybackState', () => {
   it('None is 0', () => {
@@ -52,6 +53,7 @@ describe('PlayerEvents', () => {
   it('keys match Player handler event names', () => {
     type EventKeys = keyof PlayerEvents;
     type ExpectedKeys =
+      | 'snapshotDidChange'
       | 'playbackStateDidChange'
       | 'nowPlayingItemDidChange'
       | 'playbackTimeDidChange'
@@ -64,66 +66,118 @@ describe('PlayerEvents', () => {
 });
 
 describe('Player event forwarding', () => {
-  it('emits playbackStateDidChange with payload', () => {
+  it('fans a shared snapshot out to existing integration events', () => {
     const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackStateDidChange', listener);
+    const snapshotListener = vi.fn();
+    const stateListener = vi.fn();
+    const itemListener = vi.fn();
+    player.on('snapshotDidChange', snapshotListener);
+    player.on('playbackStateDidChange', stateListener);
+    player.on('nowPlayingItemDidChange', itemListener);
 
-    const payload = { status: true, state: PlaybackState.Playing };
-    player.handlePlaybackStateDidChange(payload);
+    const snapshot = {
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      rawState: PlaybackState.Playing,
+      stableState: 'playing' as const,
+      mprisStatus: 'Playing' as const,
+      isPlaying: true,
+      metadata: { name: 'Track', artistName: 'Artist' },
+      queueLength: 1,
+      queueIndex: 0,
+    };
+    player.handleSnapshotDidChange(snapshot);
 
-    expect(listener).toHaveBeenCalledWith(payload);
+    expect(snapshotListener).toHaveBeenCalledWith(snapshot);
+    expect(stateListener).toHaveBeenCalledWith({
+      status: true,
+      state: PlaybackState.Playing,
+    });
+    expect(itemListener).toHaveBeenCalledWith(snapshot.metadata);
+    expect(player.playbackSnapshot().isPlaying).toBe(true);
   });
 
-  it('emits nowPlayingItemDidChange with payload', () => {
+  it('rejects malformed shared snapshots', () => {
     const player = new Player();
     const listener = vi.fn();
-    player.on('nowPlayingItemDidChange', listener);
+    player.on('snapshotDidChange', listener);
 
-    const payload = { name: 'Track', artistName: 'Artist' };
-    player.handleNowPlayingItemDidChange(payload);
+    (player.handleSnapshotDidChange as (snapshot: unknown) => void)({
+      ...initialPlaybackSnapshot(),
+      stableState: 'buffering',
+    });
 
-    expect(listener).toHaveBeenCalledWith(payload);
+    expect(listener).not.toHaveBeenCalled();
   });
 
-  it('emits playbackTimeDidChange with position', () => {
+  it('only emits snapshotDidChange when nothing changed', () => {
     const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackTimeDidChange', listener);
+    const snapshot = { ...initialPlaybackSnapshot(), revision: 1 };
+    player.handleSnapshotDidChange(snapshot);
 
-    player.handlePlaybackTimeDidChange(42000);
+    const stateListener = vi.fn();
+    player.on('playbackStateDidChange', stateListener);
+    player.handleSnapshotDidChange(snapshot);
 
-    expect(listener).toHaveBeenCalledWith(42000);
+    expect(stateListener).not.toHaveBeenCalled();
   });
 
-  it('emits repeatModeDidChange with mode', () => {
+  it('emits playbackStateDidChange only on state transitions', () => {
     const player = new Player();
-    const listener = vi.fn();
-    player.on('repeatModeDidChange', listener);
+    const stateListener = vi.fn();
+    player.on('playbackStateDidChange', stateListener);
 
-    player.handleRepeatModeDidChange(2);
+    const playing = {
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      rawState: PlaybackState.Playing,
+      stableState: 'playing' as const,
+      mprisStatus: 'Playing' as const,
+      isPlaying: true,
+    };
+    player.handleSnapshotDidChange(playing);
+    expect(stateListener).toHaveBeenCalledTimes(1);
 
-    expect(listener).toHaveBeenCalledWith(2);
+    const same = { ...playing, revision: 2 };
+    player.handleSnapshotDidChange(same);
+    expect(stateListener).toHaveBeenCalledTimes(1);
+
+    const paused = {
+      ...playing,
+      revision: 3,
+      rawState: PlaybackState.Paused,
+      stableState: 'paused' as const,
+      mprisStatus: 'Paused' as const,
+      isPlaying: false,
+    };
+    player.handleSnapshotDidChange(paused);
+    expect(stateListener).toHaveBeenCalledTimes(2);
   });
 
-  it('emits shuffleModeDidChange with mode', () => {
+  it('emits nowPlayingItemDidChange only when metadata changes', () => {
     const player = new Player();
-    const listener = vi.fn();
-    player.on('shuffleModeDidChange', listener);
+    const itemListener = vi.fn();
+    player.on('nowPlayingItemDidChange', itemListener);
 
-    player.handleShuffleModeDidChange(1);
+    const meta1 = {
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      metadata: { name: 'Track A' },
+    };
+    player.handleSnapshotDidChange(meta1);
+    expect(itemListener).toHaveBeenCalledTimes(1);
 
-    expect(listener).toHaveBeenCalledWith(1);
-  });
+    const same = { ...meta1, revision: 2 };
+    player.handleSnapshotDidChange(same);
+    expect(itemListener).toHaveBeenCalledTimes(1);
 
-  it('emits volumeDidChange with volume', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('volumeDidChange', listener);
-
-    player.handleVolumeDidChange(0.75);
-
-    expect(listener).toHaveBeenCalledWith(0.75);
+    const meta2 = {
+      ...meta1,
+      revision: 3,
+      metadata: { name: 'Track B' },
+    };
+    player.handleSnapshotDidChange(meta2);
+    expect(itemListener).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -133,145 +187,49 @@ describe('Player playbackSnapshot', () => {
     expect(player.playbackSnapshot()).toEqual({ isPlaying: false, positionUs: 0, state: 0 });
   });
 
-  it('reflects playing state after playbackStateDidChange', () => {
+  it('reflects playing state after snapshot', () => {
     const player = new Player();
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
-    expect(player.playbackSnapshot()).toEqual({ isPlaying: true, positionUs: 0, state: 2 });
+    player.handleSnapshotDidChange({
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      rawState: PlaybackState.Playing,
+      stableState: 'playing',
+      mprisStatus: 'Playing',
+      isPlaying: true,
+    });
+    expect(player.playbackSnapshot()).toEqual({ isPlaying: true, positionUs: 0, state: PlaybackState.Playing });
   });
 
-  it('reflects position after playbackTimeDidChange', () => {
+  it('reflects position after snapshot', () => {
     const player = new Player();
-    player.handlePlaybackTimeDidChange(42000);
+    player.handleSnapshotDidChange({
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      positionUs: 42000,
+    });
     expect(player.playbackSnapshot().positionUs).toBe(42000);
   });
 
   it('reflects paused state while preserving position', () => {
     const player = new Player();
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
-    player.handlePlaybackTimeDidChange(42000);
-    player.handlePlaybackStateDidChange({ status: false, state: PlaybackState.Paused });
-    expect(player.playbackSnapshot()).toEqual({ isPlaying: false, positionUs: 42000, state: 3 });
-  });
-
-  it('resets state but preserves position on null payload', () => {
-    const player = new Player();
-    player.handlePlaybackStateDidChange({ status: true, state: PlaybackState.Playing });
-    player.handlePlaybackTimeDidChange(42000);
-    player.handlePlaybackStateDidChange(null);
-    expect(player.playbackSnapshot()).toEqual({ isPlaying: false, positionUs: 42000, state: 0 });
-  });
-});
-
-// Validation tests for handle* methods with invalid payloads.
-describe('Player handle* payload validation', () => {
-  it('handlePlaybackStateDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackStateDidChange', listener);
-
-    (player.handlePlaybackStateDidChange as (p: unknown) => void)('invalid');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handlePlaybackStateDidChange ignores payload missing state field', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackStateDidChange', listener);
-
-    (player.handlePlaybackStateDidChange as (p: unknown) => void)({ status: true });
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handlePlaybackStateDidChange ignores payload with non-number state', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackStateDidChange', listener);
-
-    (player.handlePlaybackStateDidChange as (p: unknown) => void)({ status: true, state: 'playing' });
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleNowPlayingItemDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('nowPlayingItemDidChange', listener);
-
-    (player.handleNowPlayingItemDidChange as (p: unknown) => void)('invalid');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleNowPlayingItemDidChange ignores array payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('nowPlayingItemDidChange', listener);
-
-    (player.handleNowPlayingItemDidChange as (p: unknown) => void)([1, 2, 3]);
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handlePlaybackTimeDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackTimeDidChange', listener);
-
-    (player.handlePlaybackTimeDidChange as (p: unknown) => void)('not-a-number');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handlePlaybackTimeDidChange ignores undefined payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('playbackTimeDidChange', listener);
-
-    (player.handlePlaybackTimeDidChange as (p: unknown) => void)(undefined);
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleRepeatModeDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('repeatModeDidChange', listener);
-
-    (player.handleRepeatModeDidChange as (p: unknown) => void)('repeat');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleShuffleModeDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('shuffleModeDidChange', listener);
-
-    (player.handleShuffleModeDidChange as (p: unknown) => void)('shuffle');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleVolumeDidChange ignores string payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('volumeDidChange', listener);
-
-    (player.handleVolumeDidChange as (p: unknown) => void)('loud');
-
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it('handleVolumeDidChange ignores object payload', () => {
-    const player = new Player();
-    const listener = vi.fn();
-    player.on('volumeDidChange', listener);
-
-    (player.handleVolumeDidChange as (p: unknown) => void)({ volume: 0.5 });
-
-    expect(listener).not.toHaveBeenCalled();
+    player.handleSnapshotDidChange({
+      ...initialPlaybackSnapshot(),
+      revision: 1,
+      rawState: PlaybackState.Playing,
+      stableState: 'playing',
+      mprisStatus: 'Playing',
+      isPlaying: true,
+    });
+    player.handleSnapshotDidChange({
+      ...initialPlaybackSnapshot(),
+      revision: 2,
+      rawState: PlaybackState.Paused,
+      stableState: 'paused',
+      mprisStatus: 'Paused',
+      isPlaying: false,
+      positionUs: 42000,
+    });
+    expect(player.playbackSnapshot()).toEqual({ isPlaying: false, positionUs: 42000, state: PlaybackState.Paused });
   });
 });
 
@@ -312,15 +270,11 @@ describe('SidraHook contract', () => {
 describe('Channel contract', () => {
   it('SendChannel matches expected renderer-to-main channels', () => {
     type ExpectedSend =
-      | 'playbackStateDidChange'
-      | 'nowPlayingItemDidChange'
-      | 'playbackTimeDidChange'
-      | 'repeatModeDidChange'
-      | 'shuffleModeDidChange'
-      | 'volumeDidChange'
+      | 'playbackSnapshotDidChange'
       | 'nav:back'
       | 'nav:forward'
-      | 'nav:reload';
+      | 'nav:reload'
+      | 'nav:pluginManager';
 
     expectTypeOf<SendChannel>().toEqualTypeOf<ExpectedSend>();
   });

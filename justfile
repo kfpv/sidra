@@ -96,6 +96,18 @@ run-cdp-inspect PORT="9222": build
 run-cdp-fast PORT="9222":
     npx electron . --remote-debugging-port={{PORT}} --remote-debugging-address=127.0.0.1
 
+# Install the isolated Capacitor Android experiment with Bun
+android-install:
+    cd mobile/android && bun install
+
+# Build the Capacitor Android debug APK
+android-build:
+    cd mobile/android && bun run build
+
+# Build, install and run the Capacitor Android experiment
+android-run:
+    cd mobile/android && bun run run
+
 # Watch TypeScript for changes and rebuild
 watch:
     npx tsc --watch

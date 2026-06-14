@@ -18,6 +18,7 @@ import android.media.session.PlaybackState;
 import android.os.IBinder;
 import android.os.Handler;
 import android.os.Looper;
+import android.view.KeyEvent;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -72,6 +73,30 @@ public class PlaybackService extends Service {
         mediaSession.setCallback(
             new MediaSession.Callback() {
                 @Override
+                public boolean onMediaButtonEvent(Intent mediaButtonIntent) {
+                    KeyEvent event = mediaButtonIntent.getParcelableExtra(Intent.EXTRA_KEY_EVENT);
+                    if (event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+                        switch (event.getKeyCode()) {
+                            case KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE:
+                            case KeyEvent.KEYCODE_MEDIA_PLAY:
+                            case KeyEvent.KEYCODE_MEDIA_PAUSE:
+                                sendCommand("player:playPause");
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_NEXT:
+                                sendCommand("player:next");
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_PREVIOUS:
+                                sendCommand("player:previous");
+                                return true;
+                            case KeyEvent.KEYCODE_MEDIA_STOP:
+                                sendCommand("player:pause");
+                                return true;
+                        }
+                    }
+                    return super.onMediaButtonEvent(mediaButtonIntent);
+                }
+
+                @Override
                 public void onPlay() {
                     sendCommand("player:play");
                 }
@@ -94,6 +119,11 @@ public class PlaybackService extends Service {
                 @Override
                 public void onSeekTo(long position) {
                     sendCommand("player:seek", position / 1000.0);
+                }
+
+                @Override
+                public void onStop() {
+                    sendCommand("player:pause");
                 }
             }
         );
@@ -193,6 +223,7 @@ public class PlaybackService extends Service {
             PlaybackState.ACTION_PLAY
                 | PlaybackState.ACTION_PAUSE
                 | PlaybackState.ACTION_PLAY_PAUSE
+                | PlaybackState.ACTION_STOP
                 | PlaybackState.ACTION_SKIP_TO_NEXT
                 | PlaybackState.ACTION_SKIP_TO_PREVIOUS
                 | PlaybackState.ACTION_SEEK_TO;

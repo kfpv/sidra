@@ -79,19 +79,23 @@ function observeMenu(menu: Element): void {
   menu.setAttribute('data-sidra-plugin-manager-observed', '');
   injectPluginManagerItem(menu);
 
-  const observer = new MutationObserver(() => injectPluginManagerItem(menu));
-  observer.observe(menu, { childList: true, subtree: true });
+  new MutationObserver(() => injectPluginManagerItem(menu)).observe(menu, {
+    childList: true,
+    subtree: true,
+  });
+}
+
+function startPageObserver(): void {
+  const pageObserver = new MutationObserver(() => {
+    const mountedMenu = document.querySelector(MENU_SELECTOR);
+    if (!mountedMenu) return;
+    observeMenu(mountedMenu);
+  });
+  pageObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
 
 const menu = document.querySelector(MENU_SELECTOR);
 if (menu) {
   observeMenu(menu);
-} else {
-  const pageObserver = new MutationObserver(() => {
-    const mountedMenu = document.querySelector(MENU_SELECTOR);
-    if (!mountedMenu) return;
-    pageObserver.disconnect();
-    observeMenu(mountedMenu);
-  });
-  pageObserver.observe(document.documentElement, { childList: true, subtree: true });
 }
+startPageObserver();

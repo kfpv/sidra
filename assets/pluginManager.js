@@ -55,19 +55,18 @@
 			subtree: true
 		});
 	}
-	var menu = document.querySelector(MENU_SELECTOR);
-	if (menu) observeMenu(menu);
-	else {
-		const pageObserver = new MutationObserver(() => {
+	function startPageObserver() {
+		new MutationObserver(() => {
 			const mountedMenu = document.querySelector(MENU_SELECTOR);
 			if (!mountedMenu) return;
-			pageObserver.disconnect();
 			observeMenu(mountedMenu);
-		});
-		pageObserver.observe(document.documentElement, {
+		}).observe(document.documentElement, {
 			childList: true,
 			subtree: true
 		});
 	}
+	var menu = document.querySelector(MENU_SELECTOR);
+	if (menu) observeMenu(menu);
+	startPageObserver();
 	//#endregion
 })();

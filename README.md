@@ -4,6 +4,8 @@
   Sidra
 </h1>
 
+This is a fork of Sidra that adds Android support and will hopefully support plugins?
+
 <p align="center"><b>An elegant Apple Music desktop client for Linux, macOS and Windows. No frippery, just quality. A better class of Cider 🍎</b></p>
 
 <p align="center">Made with 💝 for 🐧🍏🪟</p>

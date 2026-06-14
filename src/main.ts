@@ -334,6 +334,24 @@ function setupSessionHeaders(ses: Electron.Session): void {
     (_details, callback) => { callback({ cancel: true }); },
   );
   mainLog.info('Telemetry requests blocked via webRequest.onBeforeRequest');
+
+  // Block requests for local item IDs at the Electron level.
+  // MusicKit's native fetch bypasses window.fetch, so renderer-level patches
+  // can't stop these. Block any amp-api request containing a local- ID
+  // anywhere in the URL (path segments like /songs/local-... and query
+  // parameters like ids[songs]=local-...).
+  ses.webRequest.onBeforeRequest(
+    { urls: ['https://amp-api.music.apple.com/*'] },
+    (details, callback) => {
+      if (/local-[a-z0-9]/i.test(details.url)) {
+        mainLog.debug('Local item request blocked:', details.url.slice(0, 120));
+        callback({ cancel: true });
+        return;
+      }
+      callback({ cancel: false });
+    },
+  );
+  mainLog.info('Local item requests blocked via webRequest.onBeforeRequest');
 }
 
 function setupWindowZoomAndNav(win: BrowserWindow): void {

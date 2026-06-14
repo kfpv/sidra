@@ -297,12 +297,12 @@ interface LocalFileDescriptor {
 
 let trackerPatched = false;
 let itemLoaderPatched = false;
-let globalFetchPatched = false;
 
 function installTrackingPatches(mk: MusicKitInstance): void {
   const pc = mk._playbackController;
 
-  // Patch 1: Block play tracking for local items (MPAFTracker.play)
+  // Patch 1: Block play tracking for local items (MPAFTracker.play).
+  // Prevents play activity from being constructed — source-level block.
   if (!trackerPatched) {
     const tracker = pc?.services?.playActivity?._trackers?.[0];
     if (tracker?.play) {
@@ -315,7 +315,8 @@ function installTrackingPatches(mk: MusicKitInstance): void {
     }
   }
 
-  // Patch 2: Skip catalog lookup for local items (itemLoader.loadItems)
+  // Patch 2: Skip catalog lookup for local items (itemLoader.loadItems).
+  // Returns empty array so MusicKit never constructs an amp-api request.
   if (!itemLoaderPatched) {
     const itemLoader = pc?.services?.itemLoader;
     if (itemLoader?.loadItems) {
@@ -332,38 +333,10 @@ function installTrackingPatches(mk: MusicKitInstance): void {
     }
   }
 
-  // Patch 3: Block telemetry and play activity for local items via window.fetch
-  // mediaAPI.fetchFunction is [native code] and can't be replaced, so we
-  // patch window.fetch as a safety net. This catches xp.apple.com telemetry
-  // and any amp-api requests for local IDs that slip through patches 1-2.
-  if (!globalFetchPatched) {
-    const origFetch = window.fetch;
-    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
-      const url = typeof input === 'string' ? input
-        : input instanceof URL ? input.href
-        : input?.url ?? '';
-      // Block telemetry unconditionally
-      if (url.includes('xp.apple.com')) {
-        return Promise.resolve(new Response('', { status: 200 }));
-      }
-      // Block play activity reports that contain local item IDs
-      if (url.includes('universal-activity-service')) {
-        const body = init?.body;
-        if (typeof body === 'string' && body.includes('"local')) {
-          return Promise.resolve(new Response('', { status: 200 }));
-        }
-      }
-      // Block catalog lookups for local item IDs
-      if (url.includes('amp-api.music.apple.com') && url.includes('local-')) {
-        return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        }));
-      }
-      return origFetch.call(window, input, init);
-    };
-    globalFetchPatched = true;
-  }
+  // Network-level blocking (amp-api local catalog lookups, xp.apple.com telemetry)
+  // is handled by Electron webRequest.onBeforeRequest in main.ts — the only
+  // reliable layer since mediaAPI.fetchFunction is [native code] that bypasses
+  // window.fetch.
 }
 
 function base64ToBlob(dataBase64: string, mimeType: string): string {

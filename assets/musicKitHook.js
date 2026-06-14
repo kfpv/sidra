@@ -300,7 +300,6 @@
 	}
 	var trackerPatched = false;
 	var itemLoaderPatched = false;
-	var globalFetchPatched = false;
 	function installTrackingPatches(mk) {
 		const pc = mk._playbackController;
 		if (!trackerPatched) {
@@ -324,23 +323,6 @@
 				};
 				itemLoaderPatched = true;
 			}
-		}
-		if (!globalFetchPatched) {
-			const origFetch = window.fetch;
-			window.fetch = function(input, init) {
-				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url ?? "";
-				if (url.includes("xp.apple.com")) return Promise.resolve(new Response("", { status: 200 }));
-				if (url.includes("universal-activity-service")) {
-					const body = init?.body;
-					if (typeof body === "string" && body.includes("\"local")) return Promise.resolve(new Response("", { status: 200 }));
-				}
-				if (url.includes("amp-api.music.apple.com") && url.includes("local-")) return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" }
-				}));
-				return origFetch.call(window, input, init);
-			};
-			globalFetchPatched = true;
 		}
 	}
 	function base64ToBlob(dataBase64, mimeType) {

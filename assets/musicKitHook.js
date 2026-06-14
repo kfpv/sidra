@@ -296,6 +296,182 @@
 		}, 250);
 		window.__sidraHookedMk = mk;
 		synchroniseSnapshot(mk);
+		installTrackingPatches(mk);
+	}
+	var trackerPatched = false;
+	var itemLoaderPatched = false;
+	var globalFetchPatched = false;
+	function installTrackingPatches(mk) {
+		const pc = mk._playbackController;
+		if (!trackerPatched) {
+			const tracker = pc?.services?.playActivity?._trackers?.[0];
+			if (tracker?.play) {
+				const origPlay = tracker.play.bind(tracker);
+				tracker.play = async function(item, opts) {
+					if (item?.id?.startsWith?.("local")) return;
+					return origPlay(item, opts);
+				};
+				trackerPatched = true;
+			}
+		}
+		if (!itemLoaderPatched) {
+			const itemLoader = pc?.services?.itemLoader;
+			if (itemLoader?.loadItems) {
+				const origLoad = itemLoader.loadItems.bind(itemLoader);
+				itemLoader.loadItems = async function(options) {
+					if (options?.id?.toString().startsWith?.("local") || options?.item?.id?.toString().startsWith?.("local") || Array.isArray(options) && options[0]?.id?.toString().startsWith?.("local")) return [];
+					return origLoad(options);
+				};
+				itemLoaderPatched = true;
+			}
+		}
+		if (!globalFetchPatched) {
+			const origFetch = window.fetch;
+			window.fetch = function(input, init) {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url ?? "";
+				if (url.includes("xp.apple.com")) return Promise.resolve(new Response("", { status: 200 }));
+				if (url.includes("universal-activity-service")) {
+					const body = init?.body;
+					if (typeof body === "string" && body.includes("\"local")) return Promise.resolve(new Response("", { status: 200 }));
+				}
+				if (url.includes("amp-api.music.apple.com") && url.includes("local-")) return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" }
+				}));
+				return origFetch.call(window, input, init);
+			};
+			globalFetchPatched = true;
+		}
+	}
+	function base64ToBlob(dataBase64, mimeType) {
+		const binary = atob(dataBase64);
+		const bytes = new Uint8Array(binary.length);
+		for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+		const blob = new Blob([bytes], { type: mimeType });
+		return URL.createObjectURL(blob);
+	}
+	function buildLocalFileItem(mk, file) {
+		const realItem = mk.queue?._queueItems?.[0]?.item;
+		const itemProto = realItem ? Object.getPrototypeOf(realItem) : {};
+		const blobUrl = base64ToBlob(file.dataBase64, file.mimeType);
+		const item = Object.create(itemProto, {
+			id: {
+				value: file.id,
+				writable: true
+			},
+			type: {
+				value: "song",
+				writable: true
+			},
+			playbackType: {
+				value: 3,
+				writable: true
+			},
+			canPlay: {
+				value: true,
+				writable: true
+			},
+			isPlayable: {
+				value: true,
+				writable: true
+			},
+			isReady: {
+				value: true,
+				writable: true
+			},
+			isPlaying: {
+				value: false,
+				writable: true
+			},
+			isLoading: {
+				value: false,
+				writable: true
+			},
+			assetURL: {
+				value: blobUrl,
+				writable: true
+			},
+			rawAssetUrl: {
+				value: blobUrl,
+				writable: true
+			},
+			previewURL: {
+				value: blobUrl,
+				writable: true
+			}
+		});
+		item.attributes = {
+			name: file.name,
+			artistName: file.artist,
+			albumName: file.album,
+			durationInMillis: file.duration * 1e3,
+			artwork: {
+				url: "",
+				width: 300,
+				height: 300,
+				bgColor: "333333",
+				textColor1: "ffffff",
+				textColor2: "ffffff",
+				textColor3: "ffffff",
+				textColor4: "ffffff",
+				hasP3: false
+			},
+			url: blobUrl,
+			trackNumber: 1,
+			discNumber: 1,
+			genreNames: [],
+			audioTraits: [],
+			audioLocale: "",
+			hasLyrics: false,
+			hasTimeSyncedLyrics: false,
+			isAppleDigitalMaster: false,
+			isMasteredForItunes: false,
+			playParams: {
+				id: file.id,
+				kind: "song"
+			},
+			releaseDate: "2024-01-01",
+			previews: [{ url: blobUrl }]
+		};
+		item._state = {
+			current: 2,
+			set: function() {}
+		};
+		item._eventRegistry = {
+			mediaItemStateDidChange: {},
+			mediaItemStateWillChange: {}
+		};
+		item._container = {
+			id: "local",
+			type: "album",
+			name: "Local Files",
+			attributes: { name: "Local Files" }
+		};
+		item._context = { featureName: "local" };
+		item.assets = [];
+		item.keyURLs = {};
+		item.hlsMetadata = {};
+		item._releaseDate = /* @__PURE__ */ new Date("2024-01-01");
+		return {
+			isAutoplay: false,
+			item
+		};
+	}
+	function injectLocalFiles(mk, files) {
+		installTrackingPatches(mk);
+		const q = mk.queue;
+		if (!q) {
+			console.error("[Sidra] No queue available");
+			return;
+		}
+		if (!q._queueItems?.length) {
+			console.warn("[Sidra] Queue is empty — start playing a track first, then add local files");
+			return;
+		}
+		const items = files.map((f) => buildLocalFileItem(mk, f));
+		const pos = (q._position ?? 0) + 1;
+		q.spliceQueueItems?.(pos, 0, items);
+		console.log(`[Sidra] Injected ${items.length} local file(s) at position ${pos}`);
 	}
 	function start() {
 		const waitForMusicKit = window.setInterval(() => {
@@ -311,10 +487,17 @@
 				const command = decodeCommand(event.data.channel, args);
 				if (command) executeCommand(window.MusicKit.getInstance(), command);
 			});
+			window.addEventListener("message", (event) => {
+				if (event.source !== window) return;
+				if (!event.data || event.data.type !== "sidra:localFiles") return;
+				const files = event.data.files;
+				if (Array.isArray(files)) injectLocalFiles(window.MusicKit.getInstance(), files);
+			});
 			window.setInterval(() => {
 				try {
 					const current = window.MusicKit.getInstance();
 					if (current !== window.__sidraHookedMk) attachToInstance(current);
+					if (!trackerPatched || !itemLoaderPatched) installTrackingPatches(current);
 				} catch {}
 			}, 5e3);
 		}, 500);

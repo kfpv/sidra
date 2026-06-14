@@ -8,6 +8,7 @@ const SEND_CHANNELS = new Set<SendChannel>([
   'nav:forward',
   'nav:reload',
   'nav:pluginManager',
+  'localFiles:select',
 ]);
 
 // Channels the main process is allowed to send to the renderer.
@@ -23,6 +24,7 @@ const RECEIVE_CHANNELS = new Set<ReceiveChannel>([
   'player:setVolume',
   'player:setRepeat',
   'player:setShuffle',
+  'localFiles:data',
 ]);
 
 // Register receive channel handlers that bridge commands to the main world.
@@ -32,6 +34,12 @@ const RECEIVE_CHANNELS = new Set<ReceiveChannel>([
 // musicKitHook.js listens for these messages and dispatches to __sidra methods.
 for (const channel of RECEIVE_CHANNELS) {
   ipcRenderer.on(channel, (_event, ...args: unknown[]) => {
+    // localFiles:data carries file descriptors, not a playback command.
+    // Forward under a distinct type so the hook can handle it separately.
+    if (channel === 'localFiles:data') {
+      window.postMessage({ type: 'sidra:localFiles', files: args[0] }, '*');
+      return;
+    }
     window.postMessage({ type: 'sidra:command', channel, args }, 'https://music.apple.com');
   });
 }

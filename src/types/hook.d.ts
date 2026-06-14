@@ -13,7 +13,8 @@ type SendChannel =
   | 'nav:back'
   | 'nav:forward'
   | 'nav:reload'
-  | 'nav:pluginManager';
+  | 'nav:pluginManager'
+  | 'localFiles:select';
 
 /** Channels the main process sends to the renderer (main → renderer). */
 type ReceiveChannel =
@@ -25,7 +26,8 @@ type ReceiveChannel =
   | 'player:seek'
   | 'player:setVolume'
   | 'player:setRepeat'
-  | 'player:setShuffle';
+  | 'player:setShuffle'
+  | 'localFiles:data';
 
 // ---------------------------------------------------------------------------
 // Hook interfaces

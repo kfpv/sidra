@@ -48,17 +48,39 @@ interface MusicKitInstance {
   skipToNextItem(): Promise<void>;
   skipToPreviousItem(): Promise<void>;
   seekToTime(seconds: number): Promise<void>;
+  changeToMediaAtIndex(index: number): Promise<void>;
   isPlaying: boolean;
   playbackState: number;
   currentPlaybackTime: number;
   currentPlaybackDuration: number;
   nowPlayingItem?: MusicKitItem | null;
   nowPlayingItemIndex: number;
-  queue?: { length?: number };
+  queue?: {
+    length?: number;
+    _queueItems?: Array<{ isAutoplay: boolean; item: MusicKitItem }>;
+    _itemIDs?: string[];
+    _position?: number;
+    spliceQueueItems?: (index: number, deleteCount: number, items: Array<{ isAutoplay: boolean; item: MusicKitItem }>) => void;
+  };
   volume: number;
   repeatMode: number;
   shuffleMode: number;
   bitrate?: number;
+  _playbackController?: {
+    services: {
+      playActivity: {
+        _trackers?: Array<{ play: (item: unknown, opts?: unknown) => Promise<void> }>;
+      };
+      itemLoader: {
+        loadItems: (options: unknown) => Promise<unknown>;
+        services: {
+          mediaAPI: {
+            fetchFunction: (url: string | { url: string }, opts?: unknown) => Promise<Response>;
+          };
+        };
+      };
+    };
+  };
 }
 
 interface MusicKitGlobal {
@@ -252,6 +274,196 @@ function attachToInstance(mk: MusicKitInstance): void {
 
   window.__sidraHookedMk = mk;
   synchroniseSnapshot(mk);
+
+  // Install tracking patches. The window.fetch patch (telemetry) installs
+  // immediately. The MusicKit-internal patches (tracker, itemLoader) retry
+  // via the interval until _playbackController.services is populated.
+  installTrackingPatches(mk);
+}
+
+// ---------------------------------------------------------------------------
+// Local file injection
+// ---------------------------------------------------------------------------
+
+interface LocalFileDescriptor {
+  id: string;
+  name: string;
+  artist: string;
+  album: string;
+  duration: number;
+  dataBase64: string;
+  mimeType: string;
+}
+
+let trackerPatched = false;
+let itemLoaderPatched = false;
+let globalFetchPatched = false;
+
+function installTrackingPatches(mk: MusicKitInstance): void {
+  const pc = mk._playbackController;
+
+  // Patch 1: Block play tracking for local items (MPAFTracker.play)
+  if (!trackerPatched) {
+    const tracker = pc?.services?.playActivity?._trackers?.[0];
+    if (tracker?.play) {
+      const origPlay = tracker.play.bind(tracker);
+      tracker.play = async function (item: unknown, opts?: unknown) {
+        if ((item as { id?: string })?.id?.startsWith?.('local')) return;
+        return origPlay(item, opts);
+      };
+      trackerPatched = true;
+    }
+  }
+
+  // Patch 2: Skip catalog lookup for local items (itemLoader.loadItems)
+  if (!itemLoaderPatched) {
+    const itemLoader = pc?.services?.itemLoader;
+    if (itemLoader?.loadItems) {
+      const origLoad = itemLoader.loadItems.bind(itemLoader);
+      itemLoader.loadItems = async function (options: unknown) {
+        if ((options as Record<string, unknown>)?.id?.toString().startsWith?.('local') ||
+            (options as Record<string, unknown>)?.item?.id?.toString().startsWith?.('local') ||
+            (Array.isArray(options) && options[0]?.id?.toString().startsWith?.('local'))) {
+          return [];
+        }
+        return origLoad(options);
+      };
+      itemLoaderPatched = true;
+    }
+  }
+
+  // Patch 3: Block telemetry and play activity for local items via window.fetch
+  // mediaAPI.fetchFunction is [native code] and can't be replaced, so we
+  // patch window.fetch as a safety net. This catches xp.apple.com telemetry
+  // and any amp-api requests for local IDs that slip through patches 1-2.
+  if (!globalFetchPatched) {
+    const origFetch = window.fetch;
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+      const url = typeof input === 'string' ? input
+        : input instanceof URL ? input.href
+        : input?.url ?? '';
+      // Block telemetry unconditionally
+      if (url.includes('xp.apple.com')) {
+        return Promise.resolve(new Response('', { status: 200 }));
+      }
+      // Block play activity reports that contain local item IDs
+      if (url.includes('universal-activity-service')) {
+        const body = init?.body;
+        if (typeof body === 'string' && body.includes('"local')) {
+          return Promise.resolve(new Response('', { status: 200 }));
+        }
+      }
+      // Block catalog lookups for local item IDs
+      if (url.includes('amp-api.music.apple.com') && url.includes('local-')) {
+        return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }));
+      }
+      return origFetch.call(window, input, init);
+    };
+    globalFetchPatched = true;
+  }
+}
+
+function base64ToBlob(dataBase64: string, mimeType: string): string {
+  const binary = atob(dataBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  const blob = new Blob([bytes], { type: mimeType });
+  return URL.createObjectURL(blob);
+}
+
+function buildLocalFileItem(mk: MusicKitInstance, file: LocalFileDescriptor): { isAutoplay: boolean; item: MusicKitItem } {
+  // Get the real MusicKit item prototype from an existing queue item.
+  // Doc requirement: "queue must be populated" — without a real item, playback fails.
+  const realItem = mk.queue?._queueItems?.[0]?.item;
+  const itemProto = realItem ? Object.getPrototypeOf(realItem) : {};
+
+  const blobUrl = base64ToBlob(file.dataBase64, file.mimeType);
+
+  const item = Object.create(itemProto, {
+    id:            { value: file.id, writable: true },
+    type:          { value: 'song', writable: true },
+    playbackType:  { value: 3, writable: true },
+    canPlay:       { value: true, writable: true },
+    isPlayable:    { value: true, writable: true },
+    isReady:       { value: true, writable: true },
+    isPlaying:     { value: false, writable: true },
+    isLoading:     { value: false, writable: true },
+    assetURL:      { value: blobUrl, writable: true },
+    rawAssetUrl:   { value: blobUrl, writable: true },
+    previewURL:    { value: blobUrl, writable: true },
+  });
+
+  item.attributes = {
+    name: file.name,
+    artistName: file.artist,
+    albumName: file.album,
+    durationInMillis: file.duration * 1000,
+    artwork: {
+      url: '',
+      width: 300,
+      height: 300,
+      bgColor: '333333',
+      textColor1: 'ffffff',
+      textColor2: 'ffffff',
+      textColor3: 'ffffff',
+      textColor4: 'ffffff',
+      hasP3: false,
+    },
+    url: blobUrl,
+    trackNumber: 1,
+    discNumber: 1,
+    genreNames: [],
+    audioTraits: [],
+    audioLocale: '',
+    hasLyrics: false,
+    hasTimeSyncedLyrics: false,
+    isAppleDigitalMaster: false,
+    isMasteredForItunes: false,
+    playParams: { id: file.id, kind: 'song' },
+    releaseDate: '2024-01-01',
+    previews: [{ url: blobUrl }],
+  };
+
+  item._state = { current: 2, set: function () {} };
+  item._eventRegistry = { mediaItemStateDidChange: {}, mediaItemStateWillChange: {} };
+  item._container = {
+    id: 'local',
+    type: 'album',
+    name: 'Local Files',
+    attributes: { name: 'Local Files' },
+  };
+  item._context = { featureName: 'local' };
+  item.assets = [];
+  item.keyURLs = {};
+  item.hlsMetadata = {};
+  item._releaseDate = new Date('2024-01-01');
+
+  return { isAutoplay: false, item };
+}
+
+function injectLocalFiles(mk: MusicKitInstance, files: LocalFileDescriptor[]): void {
+  installTrackingPatches(mk);
+
+  const q = mk.queue;
+  if (!q) {
+    console.error('[Sidra] No queue available');
+    return;
+  }
+
+  // Queue must be populated to get a real prototype for Object.create
+  if (!q._queueItems?.length) {
+    console.warn('[Sidra] Queue is empty — start playing a track first, then add local files');
+    return;
+  }
+
+  const items = files.map(f => buildLocalFileItem(mk, f));
+  const pos = (q._position ?? 0) + 1;
+  q.spliceQueueItems?.(pos, 0, items);
+
+  console.log(`[Sidra] Injected ${items.length} local file(s) at position ${pos}`);
 }
 
 function start(): void {
@@ -271,10 +483,22 @@ function start(): void {
       if (command) executeCommand(window.MusicKit!.getInstance(), command);
     });
 
+    // Handle local files data from main process
+    window.addEventListener('message', event => {
+      if (event.source !== window) return;
+      if (!event.data || event.data.type !== 'sidra:localFiles') return;
+      const files = event.data.files;
+      if (Array.isArray(files)) {
+        injectLocalFiles(window.MusicKit!.getInstance(), files);
+      }
+    });
+
     window.setInterval(() => {
       try {
         const current = window.MusicKit!.getInstance();
         if (current !== window.__sidraHookedMk) attachToInstance(current);
+        // Retry patches that need _playbackController.services
+        if (!trackerPatched || !itemLoaderPatched) installTrackingPatches(current);
       } catch {
         // MusicKit may throw while replacing its singleton.
       }

@@ -1,6 +1,7 @@
 (function() {
 	//#region hook/pluginManager.ts
 	var ITEM_ID = "sidra-plugin-manager-menu-item";
+	var LOCAL_FILES_ITEM_ID = "sidra-local-files-menu-item";
 	var MENU_SELECTOR = "amp-contextual-menu";
 	var LIST_SELECTOR = "ul.contextual-menu__list[role=\"menu\"]";
 	var OPTION_TEXT_SELECTOR = ".contextual-menu-item__option-text";
@@ -43,14 +44,48 @@
 		list.insertBefore(wrapper, signOutItem);
 		console.log("[Sidra] Plugin Manager menu item injected");
 	}
+	function injectLocalFilesItem(menu) {
+		if (document.getElementById(LOCAL_FILES_ITEM_ID)) return;
+		const list = menu.querySelector(LIST_SELECTOR);
+		if (!list) return;
+		const pluginManagerItem = document.getElementById(ITEM_ID);
+		if (!pluginManagerItem) return;
+		const wrapper = document.createElement("amp-contextual-menu-item");
+		wrapper.id = LOCAL_FILES_ITEM_ID;
+		wrapper.setAttribute("hydrated", "");
+		const item = document.createElement("li");
+		item.className = "contextual-menu-item";
+		const button = document.createElement("button");
+		button.type = "button";
+		const optionWrapper = document.createElement("span");
+		optionWrapper.className = "contextual-menu-item__option-wrapper";
+		const optionText = document.createElement("span");
+		optionText.className = "contextual-menu-item__option-text";
+		optionText.textContent = "Add Local Files";
+		optionWrapper.appendChild(optionText);
+		button.appendChild(optionWrapper);
+		item.appendChild(button);
+		wrapper.appendChild(item);
+		button.addEventListener("click", () => {
+			if (window.AMWrapper?.ipcRenderer) window.AMWrapper.ipcRenderer.send("localFiles:select");
+			else if (window.SidraAndroid?.postMessage) window.SidraAndroid.postMessage("localFiles:select");
+		});
+		list.insertBefore(wrapper, pluginManagerItem.nextSibling);
+		console.log("[Sidra] Add Local Files menu item injected");
+	}
 	function observeMenu(menu) {
 		if (menu.hasAttribute("data-sidra-plugin-manager-observed")) {
 			injectPluginManagerItem(menu);
+			injectLocalFilesItem(menu);
 			return;
 		}
 		menu.setAttribute("data-sidra-plugin-manager-observed", "");
 		injectPluginManagerItem(menu);
-		new MutationObserver(() => injectPluginManagerItem(menu)).observe(menu, {
+		injectLocalFilesItem(menu);
+		new MutationObserver(() => {
+			injectPluginManagerItem(menu);
+			injectLocalFilesItem(menu);
+		}).observe(menu, {
 			childList: true,
 			subtree: true
 		});

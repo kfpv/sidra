@@ -21,6 +21,7 @@ import { init as initWindowsTaskbar, setTaskbarSendCommandCallback } from './int
 import { cleanArtworkCache } from './artwork';
 import { init as initWedgeDetector, reset as resetWedgeDetector } from './wedgeDetector';
 import { contentReadyProbeScript } from './contentReady';
+import { initLocalFiles } from './localFiles';
 
 const SPLASH_MIN_DISPLAY_MS = 500;
 const CONTENT_READY_POLL_MS = 100;
@@ -323,6 +324,16 @@ function setupSessionHeaders(ses: Electron.Session): void {
     }
     callback({ requestHeaders: details.requestHeaders });
   });
+
+  // Block telemetry requests at the Electron level. This is the nuclear safety
+  // net — MusicKit's internal fetch uses native code that can't be patched in
+  // the renderer, so webRequest拦截 is the only reliable way to stop xp.apple.com.
+  // Harmless: telemetry is not needed for playback.
+  ses.webRequest.onBeforeRequest(
+    { urls: ['https://xp.apple.com/*', 'https://xp-critical.apple.com/*'] },
+    (_details, callback) => { callback({ cancel: true }); },
+  );
+  mainLog.info('Telemetry requests blocked via webRequest.onBeforeRequest');
 }
 
 function setupWindowZoomAndNav(win: BrowserWindow): void {
@@ -659,6 +670,7 @@ if (gotLock) {
     setTaskbarSendCommandCallback((channel, ...args) => win!.webContents.send(channel, ...args));
     setupWindowZoomAndNav(win);
     initThemeCSS(win, assets.CATPPUCCIN_CSS);
+    initLocalFiles(win);
     setupSplashTransition(win, splash, minDisplay, cssReady, winReady);
     setupSessionHeaders(ses);
     setupContentHandlers(win, player, markCssReady, assets);

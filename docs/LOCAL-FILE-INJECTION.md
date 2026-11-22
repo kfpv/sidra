@@ -421,7 +421,7 @@ The playlist UI is a Svelte app that fetches data via Apple's REST API and rende
 
 ```json
 {
-  "id": "i.EXAMPLE_SONG",
+  "id": "i.EXAMPLE_SONG_SONG",
   "type": "library-songs",
   "attributes": {
     "name": "inversion",
@@ -437,7 +437,7 @@ The playlist UI is a Svelte app that fetches data via Apple's REST API and rende
     "genreNames": ["Alternative"],
     "playParams": {
       "catalogId": "1707294101",
-      "id": "i.EXAMPLE_SONG",
+      "id": "i.EXAMPLE_SONG_SONG",
       "isLibrary": true,
       "kind": "song",
       "reporting": true,
@@ -483,13 +483,13 @@ const origFetch = window.fetch;
 window.fetch = async function(...args) {
     const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
     const resp = await origFetch.apply(this, args);
-    
-    if (url.includes('amp-api.music.apple.com') && 
-        url.includes('/v1/me/library/playlists/') && 
+
+    if (url.includes('amp-api.music.apple.com') &&
+        url.includes('/v1/me/library/playlists/') &&
         url.includes('include=tracks')) {
         const clone = resp.clone();
         const data = await clone.json();
-        
+
         if (data.data?.[0]?.relationships?.tracks?.data) {
             const tracks = data.data[0].relationships.tracks.data;
             tracks.unshift({

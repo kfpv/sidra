@@ -10,3 +10,8 @@ mobile/android/android/local.properties
 mobile/android/android/app/build/
 mobile/android/*.keystore
 mobile/android/keystore.properties
+
+# Local desktop metadata and agent session notes
+.DS_Store
+codex_session.md
+opescodeses.txt

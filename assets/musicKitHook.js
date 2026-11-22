@@ -300,6 +300,8 @@
 	}
 	var trackerPatched = false;
 	var itemLoaderPatched = false;
+	var globalFetchPatched = false;
+	var origFetchGlobal = window.fetch;
 	function installTrackingPatches(mk) {
 		const pc = mk._playbackController;
 		if (!trackerPatched) {
@@ -323,6 +325,118 @@
 				};
 				itemLoaderPatched = true;
 			}
+		}
+		if (!globalFetchPatched) {
+			const origFetch = window.fetch;
+			window.fetch = function(input, init) {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input?.url ?? "";
+				if (url.includes("amp-api.music.apple.com") && url.includes("lyrics") && url.includes("local-")) return fetchLocalLyrics(url);
+				if (url.includes("amp-api.music.apple.com") && url.includes("/me/favorites") && init?.body) {
+					const localMatch = init.body.match(/local-[a-z0-9]+/i);
+					if (localMatch) {
+						const isDelete = init.method === "DELETE";
+						const id = localMatch[0];
+						const channel = isDelete ? "localFiles:unfavourite" : "localFiles:favourite";
+						if (window.AMWrapper?.ipcRenderer) window.AMWrapper.ipcRenderer.send(channel, id);
+						else if (window.SidraAndroid?.postMessage) window.SidraAndroid.postMessage(JSON.stringify({
+							channel,
+							data: id
+						}));
+						return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" }
+						}));
+					}
+				}
+				return origFetch.call(window, input, init);
+			};
+			globalFetchPatched = true;
+		}
+	}
+	function lrcToTtml(lrc, durationSec) {
+		const lines = lrc.split("\n");
+		const parsed = [];
+		for (const line of lines) {
+			const match = line.match(/^\[(\d+:\d+\.\d+)\]\s*(.*)/);
+			if (match) {
+				const text = match[2].trim();
+				if (text.length > 0) {
+					const [min, sec] = match[1].split(":");
+					const time = parseFloat(min) * 60 + parseFloat(sec);
+					parsed.push({
+						time,
+						text
+					});
+				}
+			}
+		}
+		if (parsed.length === 0) return "";
+		let ttml = `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Line" xml:lang="en"><head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal" leadingSilence="0"><translations/></iTunesMetadata></metadata></head><body dur="${formatTtmlTime(durationSec)}"><div>`;
+		for (let i = 0; i < parsed.length; i++) {
+			const beginSec = parsed[i].time;
+			const endSec = i + 1 < parsed.length ? parsed[i + 1].time : durationSec;
+			ttml += `<p begin="${formatTtmlTime(beginSec)}" end="${formatTtmlTime(endSec)}">${escapeXml(parsed[i].text)}</p>`;
+		}
+		ttml += "</div></body></tt>";
+		return ttml;
+	}
+	function formatTtmlTime(seconds) {
+		const min = Math.floor(seconds / 60);
+		const sec = seconds % 60;
+		return `${String(min).padStart(2, "0")}:${sec.toFixed(3).padStart(6, "0")}`;
+	}
+	function escapeXml(s) {
+		return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+	}
+	async function fetchLocalLyrics(url) {
+		const idMatch = url.match(/\/songs\/(local-[^/]+)\//);
+		if (!idMatch) return new Response(JSON.stringify({ data: [] }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" }
+		});
+		const localId = idMatch[1];
+		const item = (window.MusicKit?.getInstance())?.queue?._queueItems?.find((qi) => qi.item?.id === localId)?.item;
+		if (!item?.attributes) return new Response(JSON.stringify({ data: [] }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" }
+		});
+		const { name, artistName, durationInMillis } = item.attributes;
+		const duration = (durationInMillis || 0) / 1e3;
+		try {
+			const resp = await origFetchGlobal(`https://lrclib.net/api/get?track_name=${encodeURIComponent(name || "")}&artist_name=${encodeURIComponent(artistName || "")}&duration=${Math.floor(duration)}`);
+			if (!resp.ok) return new Response(JSON.stringify({ data: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" }
+			});
+			const data = await resp.json();
+			if (!(data.syncedLyrics || data.plainLyrics)) return new Response(JSON.stringify({ data: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" }
+			});
+			const ttml = data.syncedLyrics ? lrcToTtml(data.syncedLyrics, duration) : "";
+			const plainText = data.plainLyrics || "";
+			const response = { data: [{
+				id: localId,
+				type: "syllable-lyrics",
+				attributes: {
+					playParams: {
+						catalogId: localId,
+						displayType: 2,
+						id: `local_${localId}`,
+						kind: "lyric"
+					},
+					ttmlLocalizations: ttml || `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line" xml:lang="en"><head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal" leadingSilence="0"><translations/></iTunesMetadata></metadata></head><body><div><p begin="0:00.000" end="0:05.000">${escapeXml(plainText.split("\n")[0] || "")}</p></div></body></tt>`
+				}
+			}] };
+			return new Response(JSON.stringify(response), {
+				status: 200,
+				headers: { "Content-Type": "application/json" }
+			});
+		} catch {
+			return new Response(JSON.stringify({ data: [] }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" }
+			});
 		}
 	}
 	function base64ToBlob(dataBase64, mimeType) {
@@ -404,7 +518,7 @@
 			genreNames: [],
 			audioTraits: [],
 			audioLocale: "",
-			hasLyrics: false,
+			hasLyrics: true,
 			hasTimeSyncedLyrics: false,
 			isAppleDigitalMaster: false,
 			isMasteredForItunes: false,
@@ -446,11 +560,13 @@
 			console.error("[Sidra] No queue available");
 			return;
 		}
+		const items = files.map((f) => buildLocalFileItem(mk, f));
 		if (!q._queueItems?.length) {
-			console.warn("[Sidra] Queue is empty — start playing a track first, then add local files");
+			const playItems = items.map((wi) => wi.item);
+			mk.play({ items: playItems });
+			console.log(`[Sidra] Empty queue — started playback with ${playItems.length} local file(s)`);
 			return;
 		}
-		const items = files.map((f) => buildLocalFileItem(mk, f));
 		const pos = (q._position ?? 0) + 1;
 		q.spliceQueueItems?.(pos, 0, items);
 		console.log(`[Sidra] Injected ${items.length} local file(s) at position ${pos}`);

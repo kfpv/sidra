@@ -13,6 +13,8 @@ interface StoreSchema {
   startPage: 'home' | 'new' | 'radio' | 'all-playlists' | 'last';
   lastPageUrl: string;
   zoomFactor: number;
+  'localPlaylists.favourites': string[];
+  'localPlaylists.custom': Record<string, string[]>;
 }
 
 import { Conf } from 'electron-conf/main';
@@ -108,5 +110,61 @@ export function getZoomFactor(): number {
 export function setZoomFactor(factor: number): void {
   store.set('zoomFactor', factor);
   configLog.info('zoomFactor set:', factor);
+}
+
+// --- Local playlists ---
+
+export function getFavourites(): string[] {
+  return getConfigValue('localPlaylists.favourites', []);
+}
+
+export function addFavourite(id: string): void {
+  const current = getFavourites();
+  if (!current.includes(id)) {
+    store.set('localPlaylists.favourites', [...current, id]);
+    configLog.info('favourite added:', id);
+  }
+}
+
+export function removeFavourite(id: string): void {
+  const current = getFavourites();
+  store.set('localPlaylists.favourites', current.filter(f => f !== id));
+  configLog.info('favourite removed:', id);
+}
+
+export function isFavourite(id: string): boolean {
+  return getFavourites().includes(id);
+}
+
+export function getCustomPlaylists(): Record<string, string[]> {
+  return getConfigValue('localPlaylists.custom', {});
+}
+
+export function createLocalPlaylist(name: string): void {
+  const playlists = getCustomPlaylists();
+  if (!playlists[name]) {
+    playlists[name] = [];
+    store.set('localPlaylists.custom', playlists);
+    configLog.info('local playlist created:', name);
+  }
+}
+
+export function addToLocalPlaylist(playlistName: string, id: string): void {
+  const playlists = getCustomPlaylists();
+  if (!playlists[playlistName]) playlists[playlistName] = [];
+  if (!playlists[playlistName].includes(id)) {
+    playlists[playlistName].push(id);
+    store.set('localPlaylists.custom', playlists);
+    configLog.info('added to playlist:', playlistName, id);
+  }
+}
+
+export function removeFromLocalPlaylist(playlistName: string, id: string): void {
+  const playlists = getCustomPlaylists();
+  if (playlists[playlistName]) {
+    playlists[playlistName] = playlists[playlistName].filter(i => i !== id);
+    store.set('localPlaylists.custom', playlists);
+    configLog.info('removed from playlist:', playlistName, id);
+  }
 }
 

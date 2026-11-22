@@ -22,6 +22,7 @@ import { cleanArtworkCache } from './artwork';
 import { init as initWedgeDetector, reset as resetWedgeDetector } from './wedgeDetector';
 import { contentReadyProbeScript } from './contentReady';
 import { initLocalFiles } from './localFiles';
+import { fetchLocalLyrics, buildLyricsResponse } from './localLyrics';
 
 const SPLASH_MIN_DISPLAY_MS = 500;
 const CONTENT_READY_POLL_MS = 100;
@@ -335,15 +336,21 @@ function setupSessionHeaders(ses: Electron.Session): void {
   );
   mainLog.info('Telemetry requests blocked via webRequest.onBeforeRequest');
 
-  // Block requests for local item IDs at the Electron level.
-  // MusicKit's native fetch bypasses window.fetch, so renderer-level patches
-  // can't stop these. Block any amp-api request containing a local- ID
-  // anywhere in the URL (path segments like /songs/local-... and query
-  // parameters like ids[songs]=local-...).
+  // Block local item requests at the Electron level.
+  // CDP Fetch intercept handles two specific cases:
+  //   1. Direct catalog lookups (/songs/local-*) → fake catalog response
+  //   2. Lyrics requests (/songs/local-*/syllable-lyrics) → lrclib TTML
+  // webRequest lets those two URL patterns through for CDP, and blocks
+  // everything else (batch queries, activity tracking, etc.).
   ses.webRequest.onBeforeRequest(
     { urls: ['https://amp-api.music.apple.com/*'] },
     (details, callback) => {
       if (/local-[a-z0-9]/i.test(details.url)) {
+        // Direct catalog lookup or lyrics — CDP Fetch handles these
+        if (/\/songs\/local-[a-z0-9]/i.test(details.url)) {
+          callback({ cancel: false });
+          return;
+        }
         mainLog.debug('Local item request blocked:', details.url.slice(0, 120));
         callback({ cancel: true });
         return;
@@ -351,7 +358,7 @@ function setupSessionHeaders(ses: Electron.Session): void {
       callback({ cancel: false });
     },
   );
-  mainLog.info('Local item requests blocked via webRequest.onBeforeRequest');
+  mainLog.info('Local item requests handled: CDP Fetch (direct/lyrics) + webRequest (batch blocked)');
 }
 
 function setupWindowZoomAndNav(win: BrowserWindow): void {
@@ -620,9 +627,145 @@ function setupContentHandlers(win: BrowserWindow, player: Player, markCssReady: 
     mainLog.debug('Plugin Manager menu hook injected');
   }
 
+  let cdpAttached = false;
+
+  function setupLocalLyricsIntercept(wc: Electron.WebContents): void {
+    if (cdpAttached) return;
+    if (!wc.debugger.isAttached()) {
+      try {
+        wc.debugger.attach('1.3');
+      } catch (err) {
+        mainLog.warn('CDP attach failed:', err);
+        return;
+      }
+    }
+    cdpAttached = true;
+    mainLog.info('CDP Fetch intercept enabled for local lyrics');
+
+    wc.debugger.on('detach', () => {
+      cdpAttached = false;
+      mainLog.warn('CDP debugger detached');
+    });
+
+    wc.debugger.on('message', async (_event, method, params) => {
+      if (method !== 'Fetch.requestPaused') return;
+      const { requestId, request } = params as { requestId: string; request: { url: string; method: string } };
+      const url = request.url;
+
+      // Only intercept amp-api requests containing a local- ID
+      if (!/local-[a-z0-9]/i.test(url)) {
+        try { wc.debugger.sendCommand('Fetch.continueRequest', { requestId }); } catch { /* ok */ }
+        return;
+      }
+
+      mainLog.debug('CDP intercepted local request:', url.slice(0, 120));
+
+      // Extract local ID from URL (from path or query params)
+      const idFromPath = url.match(/\/songs\/(local-[^/?]+)/);
+      const idFromQuery = url.match(/local-[a-z0-9]+/i);
+      const localId = idFromPath?.[1] || idFromQuery?.[0];
+
+      if (!localId) {
+        try { wc.debugger.sendCommand('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify({ data: [] })).toString('base64'),
+        }); } catch { /* ok */ }
+        return;
+      }
+
+      // Get item info from the renderer's queue
+      let itemInfo: { name: string; artist: string; duration: number } | null = null;
+      try {
+        const itemJson = await wc.executeJavaScript(`
+          JSON.stringify((() => {
+            const mk = window.MusicKit?.getInstance();
+            const item = mk?.queue?._queueItems?.find(qi => qi.item?.id === '${localId}')?.item;
+            if (!item?.attributes) return null;
+            return { name: item.attributes.name, artist: item.attributes.artistName, duration: (item.attributes.durationInMillis || 0) / 1000 };
+          })())
+        `);
+        itemInfo = itemJson ? JSON.parse(itemJson) : null;
+      } catch { /* ok */ }
+
+      // Lyrics request: return lrclib TTML
+      if (/lyrics/i.test(url)) {
+        if (!itemInfo) {
+          try { wc.debugger.sendCommand('Fetch.fulfillRequest', {
+            requestId,
+            responseCode: 200,
+            responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+            body: Buffer.from(JSON.stringify({ data: [] })).toString('base64'),
+          }); } catch { /* ok */ }
+          return;
+        }
+
+        const ttml = await fetchLocalLyrics(itemInfo.name, itemInfo.artist, itemInfo.duration);
+        const body = buildLyricsResponse(localId, ttml);
+        mainLog.debug('CDP lyrics response:', itemInfo.name, '- ttsml length:', ttml.length);
+
+        try { wc.debugger.sendCommand('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(body).toString('base64'),
+        }); } catch { /* ok */ }
+        return;
+      }
+
+      // Catalog lookup: return fake catalog data so MusicKit thinks the item
+      // exists and has lyrics. This is needed because MusicKit won't request
+      // lyrics for items it can't resolve via catalog.
+      if (itemInfo) {
+        const catalogResponse = JSON.stringify({
+          data: [{
+            id: localId,
+            type: 'songs',
+            attributes: {
+              name: itemInfo.name,
+              artistName: itemInfo.artist,
+              durationInMillis: itemInfo.duration * 1000,
+              hasLyrics: true,
+              hasTimeSyncedLyrics: false,
+              albumName: 'Local Files',
+              trackNumber: 1,
+              discNumber: 1,
+              genreNames: [],
+              artwork: { url: '', width: 300, height: 300 },
+              playParams: { id: localId, kind: 'song' },
+            },
+          }],
+        });
+        try { wc.debugger.sendCommand('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(catalogResponse).toString('base64'),
+        }); } catch { /* ok */ }
+      } else {
+        try { wc.debugger.sendCommand('Fetch.fulfillRequest', {
+          requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'application/json' }],
+          body: Buffer.from(JSON.stringify({ data: [] })).toString('base64'),
+        }); } catch { /* ok */ }
+      }
+    });
+
+    wc.debugger.sendCommand('Fetch.enable', {
+      patterns: [{ urlPattern: '*://amp-api.music.apple.com/*local-*', requestStage: 'Request' }],
+    }).catch(err => {
+      mainLog.warn('Fetch.enable failed:', err);
+    });
+  }
+
   let initialized = false;
   win.webContents.on('did-finish-load', async () => {
     await injectContent();
+
+    // Set up CDP Fetch intercept for local lyrics on first load
+    setupLocalLyricsIntercept(win.webContents);
 
     if (!initialized) {
       initialized = true;

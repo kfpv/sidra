@@ -297,6 +297,10 @@ interface LocalFileDescriptor {
 
 let trackerPatched = false;
 let itemLoaderPatched = false;
+let globalFetchPatched = false;
+
+// Store original fetch before any patches so lrclib fetches use the real native fetch.
+const origFetchGlobal = window.fetch;
 
 function installTrackingPatches(mk: MusicKitInstance): void {
   const pc = mk._playbackController;
@@ -337,6 +341,139 @@ function installTrackingPatches(mk: MusicKitInstance): void {
   // is handled by Electron webRequest.onBeforeRequest in main.ts — the only
   // reliable layer since mediaAPI.fetchFunction is [native code] that bypasses
   // window.fetch.
+
+  // Patch 3: Intercept requests for local items via window.fetch.
+  // Catches lyrics (→ lrclib), favourites (→ local config), and blocks
+  // everything else with local- IDs. Real track requests pass through.
+  if (!globalFetchPatched) {
+    const origFetch = window.fetch;
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+      const url = typeof input === 'string' ? input
+        : input instanceof URL ? input.href
+        : input?.url ?? '';
+
+      // Lyrics for local items → fetch from lrclib
+      if (url.includes('amp-api.music.apple.com') && url.includes('lyrics') && url.includes('local-')) {
+        return fetchLocalLyrics(url);
+      }
+
+      // Favourites/unfavourites for local items → save locally via IPC
+      if (url.includes('amp-api.music.apple.com') && url.includes('/me/favorites') && init?.body) {
+        const body = init.body as string;
+        const localMatch = body.match(/local-[a-z0-9]+/i);
+        if (localMatch) {
+          const isDelete = init.method === 'DELETE';
+          const id = localMatch[0];
+          const channel = isDelete ? 'localFiles:unfavourite' : 'localFiles:favourite';
+          if (window.AMWrapper?.ipcRenderer) {
+            window.AMWrapper.ipcRenderer.send(channel, id);
+          } else if (window.SidraAndroid?.postMessage) {
+            window.SidraAndroid.postMessage(JSON.stringify({ channel, data: id }));
+          }
+          return Promise.resolve(new Response(JSON.stringify({ data: [] }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }));
+        }
+      }
+
+      return origFetch.call(window, input, init);
+    };
+    globalFetchPatched = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// lrclib lyrics
+// ---------------------------------------------------------------------------
+
+function lrcToTtml(lrc: string, durationSec: number): string {
+  const lines = lrc.split('\n');
+  const parsed: Array<{ time: number; text: string }> = [];
+
+  for (const line of lines) {
+    const match = line.match(/^\[(\d+:\d+\.\d+)\]\s*(.*)/);
+    if (match) {
+      const text = match[2].trim();
+      if (text.length > 0) {
+        const [min, sec] = match[1].split(':');
+        const time = parseFloat(min) * 60 + parseFloat(sec);
+        parsed.push({ time, text });
+      }
+    }
+  }
+
+  if (parsed.length === 0) return '';
+
+  const durStr = formatTtmlTime(durationSec);
+
+  let ttml = `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" itunes:timing="Line" xml:lang="en"><head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal" leadingSilence="0"><translations/></iTunesMetadata></metadata></head><body dur="${durStr}"><div>`;
+
+  for (let i = 0; i < parsed.length; i++) {
+    const beginSec = parsed[i].time;
+    const endSec = i + 1 < parsed.length ? parsed[i + 1].time : durationSec;
+    ttml += `<p begin="${formatTtmlTime(beginSec)}" end="${formatTtmlTime(endSec)}">${escapeXml(parsed[i].text)}</p>`;
+  }
+
+  ttml += '</div></body></tt>';
+  return ttml;
+}
+
+function formatTtmlTime(seconds: number): string {
+  const min = Math.floor(seconds / 60);
+  const sec = seconds % 60;
+  return `${String(min).padStart(2, '0')}:${sec.toFixed(3).padStart(6, '0')}`;
+}
+
+function escapeXml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+async function fetchLocalLyrics(url: string): Promise<Response> {
+  // Extract item ID from URL: /songs/local-xxx/syllable-lyrics
+  const idMatch = url.match(/\/songs\/(local-[^/]+)\//);
+  if (!idMatch) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const localId = idMatch[1];
+
+  // Find the item in the queue to get name/artist/duration
+  const mk = window.MusicKit?.getInstance();
+  const item = mk?.queue?._queueItems?.find(qi => qi.item?.id === localId)?.item;
+  if (!item?.attributes) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  const { name, artistName, durationInMillis } = item.attributes;
+  const duration = (durationInMillis || 0) / 1000;
+
+  try {
+    const lrclibUrl = `https://lrclib.net/api/get?track_name=${encodeURIComponent(name || '')}&artist_name=${encodeURIComponent(artistName || '')}&duration=${Math.floor(duration)}`;
+    const resp = await origFetchGlobal(lrclibUrl);
+    if (!resp.ok) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+    const data = await resp.json();
+    const lrc = data.syncedLyrics || data.plainLyrics;
+    if (!lrc) return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+    const ttml = data.syncedLyrics ? lrcToTtml(data.syncedLyrics, duration) : '';
+    const plainText = data.plainLyrics || '';
+
+    const response = {
+      data: [{
+        id: localId,
+        type: 'syllable-lyrics',
+        attributes: {
+          playParams: { catalogId: localId, displayType: 2, id: `local_${localId}`, kind: 'lyric' },
+          ttmlLocalizations: ttml || `<tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Line" xml:lang="en"><head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal" leadingSilence="0"><translations/></iTunesMetadata></metadata></head><body><div><p begin="0:00.000" end="0:05.000">${escapeXml(plainText.split('\n')[0] || '')}</p></div></body></tt>`,
+        }
+      }]
+    };
+
+    return new Response(JSON.stringify(response), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch {
+    return new Response(JSON.stringify({ data: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
 }
 
 function base64ToBlob(dataBase64: string, mimeType: string): string {
@@ -391,7 +528,7 @@ function buildLocalFileItem(mk: MusicKitInstance, file: LocalFileDescriptor): { 
     genreNames: [],
     audioTraits: [],
     audioLocale: '',
-    hasLyrics: false,
+    hasLyrics: true,
     hasTimeSyncedLyrics: false,
     isAppleDigitalMaster: false,
     isMasteredForItunes: false,
@@ -426,13 +563,16 @@ function injectLocalFiles(mk: MusicKitInstance, files: LocalFileDescriptor[]): v
     return;
   }
 
-  // Queue must be populated to get a real prototype for Object.create
+  const items = files.map(f => buildLocalFileItem(mk, f));
+
+  // Empty queue: start playback directly via mk.play()
   if (!q._queueItems?.length) {
-    console.warn('[Sidra] Queue is empty — start playing a track first, then add local files');
+    const playItems = items.map(wi => wi.item);
+    void mk.play({ items: playItems });
+    console.log(`[Sidra] Empty queue — started playback with ${playItems.length} local file(s)`);
     return;
   }
 
-  const items = files.map(f => buildLocalFileItem(mk, f));
   const pos = (q._position ?? 0) + 1;
   q.spliceQueueItems?.(pos, 0, items);
 

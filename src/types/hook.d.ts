@@ -14,7 +14,14 @@ type SendChannel =
   | 'nav:forward'
   | 'nav:reload'
   | 'nav:pluginManager'
-  | 'localFiles:select';
+  | 'localFiles:select'
+  | 'localFiles:favourite'
+  | 'localFiles:unfavourite'
+  | 'localFiles:isFavourite'
+  | 'localFiles:createPlaylist'
+  | 'localFiles:addToPlaylist'
+  | 'localFiles:removeFromPlaylist'
+  | 'localFiles:getPlaylists';
 
 /** Channels the main process sends to the renderer (main → renderer). */
 type ReceiveChannel =
@@ -27,7 +34,9 @@ type ReceiveChannel =
   | 'player:setVolume'
   | 'player:setRepeat'
   | 'player:setShuffle'
-  | 'localFiles:data';
+  | 'localFiles:data'
+  | 'localFiles:favouriteResult'
+  | 'localFiles:playlistsResult';
 
 // ---------------------------------------------------------------------------
 // Hook interfaces

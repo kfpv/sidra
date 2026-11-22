@@ -2,6 +2,8 @@ import { dialog, BrowserWindow, ipcMain } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import log from 'electron-log/main';
+import { parseBuffer } from 'music-metadata';
+import { addFavourite, removeFavourite, isFavourite, createLocalPlaylist, addToLocalPlaylist, removeFromLocalPlaylist, getCustomPlaylists } from './config';
 
 const mainLog = log.scope('localFiles');
 
@@ -37,8 +39,35 @@ function getMimeType(ext: string): string {
   return map[ext] || 'audio/octet-stream';
 }
 
+async function getAudioDuration(filePath: string, buffer: Buffer): Promise<number> {
+  try {
+    const metadata = await parseBuffer(new Uint8Array(buffer), undefined, { duration: true });
+    return metadata.format.duration ?? 0;
+  } catch (err) {
+    mainLog.warn(`Failed to parse audio metadata: ${filePath}`, err);
+    return 0;
+  }
+}
+
 function getFileNameWithoutExt(filePath: string): string {
-  return path.basename(filePath, path.extname(filePath));
+  let base = path.basename(filePath);
+  // Strip all extensions (handles .mp4a.m4a, .flac.flac, etc.)
+  while (base.includes('.')) {
+    base = path.basename(base, path.extname(base));
+  }
+  return base;
+}
+
+function parseArtistTitle(filename: string): { artist: string; title: string } {
+  // "Artist - Title" → split on first " - "
+  const dashIdx = filename.indexOf(' - ');
+  if (dashIdx === -1) {
+    return { artist: 'Unknown Artist', title: filename };
+  }
+  return {
+    artist: filename.slice(0, dashIdx).trim(),
+    title: filename.slice(dashIdx + 3).trim(),
+  };
 }
 
 async function selectFiles(win: BrowserWindow): Promise<LocalFile[]> {
@@ -65,13 +94,15 @@ async function selectFiles(win: BrowserWindow): Promise<LocalFile[]> {
 
     try {
       const data = fs.readFileSync(filePath);
-      const name = getFileNameWithoutExt(filePath);
+      const rawName = getFileNameWithoutExt(filePath);
+      const { artist, title } = parseArtistTitle(rawName);
+      const duration = await getAudioDuration(filePath, data);
       files.push({
         id: generateId(),
-        name,
-        artist: 'Local File',
+        name: title,
+        artist,
         album: 'Local Files',
-        duration: 0,
+        duration,
         dataBase64: data.toString('base64'),
         mimeType: getMimeType(ext),
       });
@@ -90,5 +121,35 @@ export function initLocalFiles(win: BrowserWindow): void {
     if (files.length > 0) {
       win.webContents.send('localFiles:data', files);
     }
+  });
+
+  ipcMain.on('localFiles:favourite', (_event, id: string) => {
+    addFavourite(id);
+    mainLog.info('favourited:', id);
+  });
+
+  ipcMain.on('localFiles:unfavourite', (_event, id: string) => {
+    removeFavourite(id);
+    mainLog.info('unfavourited:', id);
+  });
+
+  ipcMain.on('localFiles:isFavourite', (_event, id: string) => {
+    win.webContents.send('localFiles:favouriteResult', { id, isFavourite: isFavourite(id) });
+  });
+
+  ipcMain.on('localFiles:createPlaylist', (_event, name: string) => {
+    createLocalPlaylist(name);
+  });
+
+  ipcMain.on('localFiles:addToPlaylist', (_event, playlistName: string, id: string) => {
+    addToLocalPlaylist(playlistName, id);
+  });
+
+  ipcMain.on('localFiles:removeFromPlaylist', (_event, playlistName: string, id: string) => {
+    removeFromLocalPlaylist(playlistName, id);
+  });
+
+  ipcMain.on('localFiles:getPlaylists', () => {
+    win.webContents.send('localFiles:playlistsResult', getCustomPlaylists());
   });
 }

@@ -9,6 +9,13 @@ const SEND_CHANNELS = new Set<SendChannel>([
   'nav:reload',
   'nav:pluginManager',
   'localFiles:select',
+  'localFiles:favourite',
+  'localFiles:unfavourite',
+  'localFiles:isFavourite',
+  'localFiles:createPlaylist',
+  'localFiles:addToPlaylist',
+  'localFiles:removeFromPlaylist',
+  'localFiles:getPlaylists',
 ]);
 
 // Channels the main process is allowed to send to the renderer.
@@ -25,6 +32,8 @@ const RECEIVE_CHANNELS = new Set<ReceiveChannel>([
   'player:setRepeat',
   'player:setShuffle',
   'localFiles:data',
+  'localFiles:favouriteResult',
+  'localFiles:playlistsResult',
 ]);
 
 // Register receive channel handlers that bridge commands to the main world.
@@ -38,6 +47,11 @@ for (const channel of RECEIVE_CHANNELS) {
     // Forward under a distinct type so the hook can handle it separately.
     if (channel === 'localFiles:data') {
       window.postMessage({ type: 'sidra:localFiles', files: args[0] }, '*');
+      return;
+    }
+    // Result channels carry data back to the hook.
+    if (channel === 'localFiles:favouriteResult' || channel === 'localFiles:playlistsResult') {
+      window.postMessage({ type: 'sidra:localFilesResult', channel, data: args[0] }, '*');
       return;
     }
     window.postMessage({ type: 'sidra:command', channel, args }, 'https://music.apple.com');
